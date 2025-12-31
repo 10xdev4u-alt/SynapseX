@@ -1,0 +1,31 @@
+{
+  "node": {
+    "id": "",
+    "name": "synapse-node"
+  },
+  "p2p": {
+    "listen_port": 8080,
+    "bootstrap_peers": [
+      "192.168.1.100:8080",
+      "192.168.1.101:8080"
+    ],
+    "max_peers": 50,
+    "enable_discovery": false
+  },
+  "storage": {
+    "data_dir": "~/.synapse/data",
+    "max_size_gb": 10,
+    "enable_backups": true
+  },
+  "ai": {
+    "endpoint": "https://svceai.site/api/chat",
+    "timeout": 30,
+    "max_retries": 3,
+    "enable_offline_queue": true
+  },
+  "logging": {
+    "level": "info",
+    "format": "json",
+    "output_file": ""
+  }
+}
