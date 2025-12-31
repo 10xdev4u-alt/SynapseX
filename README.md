@@ -75,6 +75,7 @@ The project is being developed in 10 structured phases:
 
 - Go 1.21 or higher
 - Git
+- Make (optional, for build automation)
 
 ### Installation
 
@@ -83,11 +84,84 @@ The project is being developed in 10 structured phases:
 git clone https://github.com/princetheprogrammer/synapse.git
 cd synapse
 
-# Build the application
+# Install dependencies
+go mod download
+
+# Build using Make (recommended)
+make build
+
+# Or build directly with Go
 go build -o bin/synapse ./cmd/synapse
 
 # Run a node
 ./bin/synapse
+```
+
+### Building from Source
+
+```bash
+# Format code
+make fmt
+
+# Run tests
+make test
+
+# Run tests with coverage
+make coverage
+
+# Build for all platforms
+make build-all
+
+# Development mode (debug logging)
+make dev
+```
+
+### Configuration
+
+Create a configuration file at `~/.synapse/config.json` or use command-line flags:
+
+```bash
+# Show version
+./bin/synapse --version
+
+# Specify custom config
+./bin/synapse --config /path/to/config.json
+
+# Override settings
+./bin/synapse --port 9090 --log-level debug --log-format console
+```
+
+Example configuration:
+```json
+{
+  "node": {
+    "name": "my-synapse-node"
+  },
+  "p2p": {
+    "listen_port": 8080,
+    "max_peers": 50
+  },
+  "logging": {
+    "level": "info",
+    "format": "json"
+  }
+}
+```
+
+See `config.example.json` for a complete configuration template.
+
+### Running Tests
+
+```bash
+# Run all tests
+make test
+
+# Verbose output
+make test-v
+
+# Generate coverage report
+make coverage
+# Opens coverage.html in browser
 ```
 
 ## Roadmap
@@ -109,4 +183,19 @@ MIT License - See LICENSE file for details
 
 ## Contributing
 
-This is a personal project currently in active development. Contributions, ideas, and feedback are welcome.
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
+
+### Quick Start for Contributors
+
+1. Fork and clone the repository
+2. Create a feature branch: `git checkout -b feature/amazing-feature`
+3. Make your changes following [development guidelines](docs/DEVELOPMENT.md)
+4. Run tests: `make test`
+5. Commit with conventional commits: `feat(scope): description`
+6. Push and create a Pull Request
+
+### Development Resources
+
+- [Architecture Documentation](docs/ARCHITECTURE.md) - System design and components
+- [Development Guidelines](docs/DEVELOPMENT.md) - Coding standards and best practices
+- [Phase Documentation](docs/PHASE_1.md) - Current development phase details
