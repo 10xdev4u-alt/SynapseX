@@ -13,6 +13,7 @@ import (
 	"github.com/princetheprogrammer/synapse/internal/config"
 	"github.com/princetheprogrammer/synapse/internal/logger"
 	"github.com/princetheprogrammer/synapse/pkg/p2p/crypto"
+	"github.com/princetheprogrammer/synapse/pkg/p2p/discovery"
 )
 
 // Network represents the P2P network implementation
@@ -20,6 +21,7 @@ type Network struct {
 	config       *config.Config
 	logger       *logger.Logger
 	nodeID       string
+	nodeName     string
 	listener     net.Listener
 	pool         *ConnectionPool
 	peers        map[string]*Peer
@@ -34,6 +36,11 @@ type Network struct {
 	// Crypto components for Phase 3
 	encryptor       *crypto.Encryptor
 	handshakeMgr    *crypto.HandshakeManager
+
+	// Discovery components for Phase 3
+	bootstrapMgr    *discovery.BootstrapManager
+	mdnsDiscoverer  *discovery.MDNSDiscoverer
+	peerExchange    *discovery.PeerExchange
 }
 
 // New creates a new P2P network instance
@@ -60,6 +67,7 @@ func New(cfg *config.Config, logger *logger.Logger, nodeID string) (*Network, er
 		config:      cfg,
 		logger:      networkLogger,
 		nodeID:      nodeID,
+		nodeName:    cfg.Node.Name,
 		peers:       make(map[string]*Peer),
 		messageChan: make(chan Message, DefaultMessageQueueSize),
 		encryptor:   encryptor,
@@ -67,6 +75,8 @@ func New(cfg *config.Config, logger *logger.Logger, nodeID string) (*Network, er
 
 	// Initialize components
 	n.handshakeMgr = crypto.NewHandshakeManager(encryptor, nodeID)
+	n.bootstrapMgr = discovery.NewBootstrapManager(cfg.P2P.BootstrapPeers)
+	n.peerExchange = discovery.NewPeerExchange(cfg.P2P.MaxPeers)
 
 	// Initialize connection pool
 	n.pool = NewConnectionPool(networkLogger, cfg.P2P.MaxPeers, DefaultConnectionTimeout)
@@ -111,6 +121,16 @@ func (n *Network) Start(ctx context.Context) error {
 	if n.config.P2P.EnableDiscovery {
 		go n.heartbeatService()
 	}
+
+	// Initialize mDNS discoverer
+	n.mdnsDiscoverer = discovery.NewMDNSDiscoverer(n.nodeName, n.config.P2P.ListenPort, []string{fmt.Sprintf("node_id=%s", n.nodeID)})
+	if err := n.mdnsDiscoverer.Start(ctx); err != nil {
+		n.logger.Errorf("failed to start mDNS discovery: %v", err)
+		// Don't fail startup for mDNS issues
+	}
+
+	// Start bootstrap connections
+	go n.connectToBootstrapNodes()
 
 	return nil
 }
