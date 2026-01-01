@@ -14,6 +14,7 @@ import (
 	"github.com/princetheprogrammer/synapse/internal/logger"
 	"github.com/princetheprogrammer/synapse/pkg/p2p/crypto"
 	"github.com/princetheprogrammer/synapse/pkg/p2p/discovery"
+	"github.com/princetheprogrammer/synapse/pkg/p2p/monitor"
 	"github.com/princetheprogrammer/synapse/pkg/p2p/topology"
 )
 
@@ -45,6 +46,9 @@ type Network struct {
 
 	// Topology components for Phase 3
 	topologyMgr     *topology.Manager
+
+	// Monitor components for Phase 3
+	monitor         *monitor.NetworkMonitor
 }
 
 // New creates a new P2P network instance
@@ -81,6 +85,7 @@ func New(cfg *config.Config, logger *logger.Logger, nodeID string) (*Network, er
 	n.handshakeMgr = crypto.NewHandshakeManager(encryptor, nodeID)
 	n.bootstrapMgr = discovery.NewBootstrapManager(cfg.P2P.BootstrapPeers)
 	n.topologyMgr = topology.NewManager(cfg.P2P.MaxPeers)
+	n.monitor = monitor.NewNetworkMonitor(n.topologyMgr)
 	n.peerExchange = discovery.NewPeerExchange(cfg.P2P.MaxPeers)
 
 	// Initialize connection pool
@@ -136,6 +141,12 @@ func (n *Network) Start(ctx context.Context) error {
 
 	// Start bootstrap connections
 	go n.connectToBootstrapNodes()
+
+	// Start monitoring
+	n.monitor.Start()
+
+	// Start periodic peer discovery
+	go n.periodicPeerDiscovery()
 
 	return nil
 }
@@ -442,6 +453,10 @@ func (n *Network) sendMessageToConn(conn net.Conn, msg Message) error {
 	if err != nil {
 		return fmt.Errorf("failed to write message to connection: %w", err)
 	}
+
+	// Update monitoring stats
+	n.monitor.Stats.AddBytesSent(uint64(len(data)))
+	n.monitor.Stats.IncrementMessagesSent()
 
 	return nil
 }
@@ -767,6 +782,7 @@ func (n *Network) readMessages(conn net.Conn, connection *Connection) error {
 
 			// Update last seen time
 			connection.UpdateLastSeen()
+			n.monitor.Stats.AddBytesReceived(uint64(len(data)))
 
 			// Deserialize the message
 			msg, err := DeserializeMessage(data)
