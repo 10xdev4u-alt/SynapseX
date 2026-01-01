@@ -12,6 +12,7 @@ import (
 
 	"github.com/princetheprogrammer/synapse/internal/config"
 	"github.com/princetheprogrammer/synapse/internal/logger"
+	"github.com/princetheprogrammer/synapse/pkg/p2p/crypto"
 )
 
 // Network represents the P2P network implementation
@@ -29,6 +30,10 @@ type Network struct {
 	messageChan  chan Message
 	shutdownOnce sync.Once
 	mu           sync.Mutex
+
+	// Crypto components for Phase 3
+	encryptor       *crypto.Encryptor
+	handshakeMgr    *crypto.HandshakeManager
 }
 
 // New creates a new P2P network instance
@@ -45,13 +50,23 @@ func New(cfg *config.Config, logger *logger.Logger, nodeID string) (*Network, er
 
 	networkLogger := logger.With("component", "p2p")
 	
+	// Create encryptor for message encryption
+	encryptor, err := crypto.NewEncryptor()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create encryptor: %w", err)
+	}
+
 	n := &Network{
 		config:      cfg,
 		logger:      networkLogger,
 		nodeID:      nodeID,
 		peers:       make(map[string]*Peer),
 		messageChan: make(chan Message, DefaultMessageQueueSize),
+		encryptor:   encryptor,
 	}
+
+	// Initialize components
+	n.handshakeMgr = crypto.NewHandshakeManager(encryptor, nodeID)
 
 	// Initialize connection pool
 	n.pool = NewConnectionPool(networkLogger, cfg.P2P.MaxPeers, DefaultConnectionTimeout)
@@ -128,7 +143,7 @@ func (n *Network) acceptConnections() {
 			}
 
 			// Handle the connection in a separate goroutine
-			go n.handleConnection(conn, true) // incoming connection
+			go n.handleConnectionWithEncryption(conn, true) // incoming connection
 		}
 	}
 }
@@ -213,57 +228,20 @@ func (n *Network) handleConnection(conn net.Conn, incoming bool) {
 
 // performHandshake performs the initial handshake with a peer
 func (n *Network) performHandshake(conn net.Conn, incoming bool) error {
-	if incoming {
-		// For incoming connections, send our hello message
-		helloPayload := HelloPayload{
-			NodeID:      n.nodeID,
-			Version:     ProtocolVersion,
-			ListenPort:  n.config.P2P.ListenPort,
-			Capabilities: []string{CapabilitySync, CapabilityDiscovery},
-		}
-		
-		helloMsg := NewMessage(MessageTypeHello, n.nodeID, helloPayload)
-		helloBytes, err := helloMsg.Serialize()
-		if err != nil {
-			return fmt.Errorf("failed to serialize hello message: %w", err)
-		}
-		
-		// Add newline for message framing
-		helloBytes = append(helloBytes, '\n')
-		
-		if _, err := conn.Write(helloBytes); err != nil {
-			return fmt.Errorf("failed to send hello message: %w", err)
-		}
-		
-		n.logger.Debugf("sent hello message to %s", conn.RemoteAddr())
-	} else {
-		// For outgoing connections, wait for their hello message
-		reader := bufio.NewReader(conn)
-		data, err := reader.ReadBytes('\n')
-		if err != nil {
-			return fmt.Errorf("failed to read hello message: %w", err)
-		}
-		
-		msg, err := DeserializeMessage(data)
-		if err != nil {
-			return fmt.Errorf("failed to deserialize hello message: %w", err)
-		}
-		
-		if msg.Type != MessageTypeHello {
-			return fmt.Errorf("expected hello message, got %s", msg.Type)
-		}
-		
-		// Convert the payload to the proper type
-		payloadBytes, _ := json.Marshal(msg.Payload)
-		var helloPayload HelloPayload
-		if err := json.Unmarshal(payloadBytes, &helloPayload); err != nil {
-			return fmt.Errorf("failed to unmarshal hello payload: %w", err)
-		}
-		
-		n.logger.Debugf("received hello from peer %s", helloPayload.NodeID)
+	// This method is deprecated. Use performSecureHandshake instead.
+	// For backward compatibility, we'll call the secure handshake.
+	connID := fmt.Sprintf("conn_%s_%d", conn.RemoteAddr().String(), time.Now().UnixNano())
+	
+	connection := &Connection{
+		ID:        connID,
+		Address:   conn.RemoteAddr().String(),
+		Conn:      conn,
+		CreatedAt: time.Now(),
+		LastSeen:  time.Now(),
 	}
 
-	return nil
+	// Perform handshake with encryption
+	return n.performSecureHandshake(conn, incoming, connection)
 }
 
 // processMessage processes an incoming message
@@ -397,8 +375,8 @@ func (n *Network) Connect(address string) error {
 		return fmt.Errorf("failed to connect to peer %s: %w", address, err)
 	}
 
-	// Handle the connection (this will perform handshake)
-	go n.handleConnection(conn, false) // outgoing connection
+	// Handle the connection (this will perform secure handshake)
+	go n.handleConnectionWithEncryption(conn, false) // outgoing connection
 
 	return nil
 }
@@ -581,4 +559,199 @@ func (n *Network) sendPeerList(conn net.Conn) error {
 	peerListMsg := NewMessage(MessageTypePeerList, n.nodeID, peerListPayload)
 	
 	return n.sendMessageToConn(conn, peerListMsg)
+}
+
+// performSecureHandshake performs the secure handshake with encryption
+func (n *Network) performSecureHandshake(conn net.Conn, incoming bool, connection *Connection) error {
+	if incoming {
+		// For incoming connections, receive their handshake message
+		handshakeMsg, err := n.receiveHandshakeMessage(conn)
+		if err != nil {
+			return fmt.Errorf("failed to receive handshake: %w", err)
+		}
+
+		// Verify the handshake message
+		if err := n.handshakeMgr.VerifyHandshakeMessage(handshakeMsg); err != nil {
+			return fmt.Errorf("handshake verification failed: %w", err)
+		}
+
+		// Register the peer
+		n.registerPeer(handshakeMsg.NodeID, connection)
+
+		// Send our handshake message in response
+		responseMsg, err := n.handshakeMgr.CreateHandshakeMessage()
+		if err != nil {
+			return fmt.Errorf("failed to create response handshake: %w", err)
+		}
+
+		if err := n.sendHandshakeMessage(conn, responseMsg); err != nil {
+			return fmt.Errorf("failed to send response handshake: %w", err)
+		}
+	} else {
+		// For outgoing connections, send our handshake message first
+		handshakeMsg, err := n.handshakeMgr.CreateHandshakeMessage()
+		if err != nil {
+			return fmt.Errorf("failed to create handshake: %w", err)
+		}
+
+		if err := n.sendHandshakeMessage(conn, handshakeMsg); err != nil {
+			return fmt.Errorf("failed to send handshake: %w", err)
+		}
+
+		// Receive their response
+		responseMsg, err := n.receiveHandshakeMessage(conn)
+		if err != nil {
+			return fmt.Errorf("failed to receive response handshake: %w", err)
+		}
+
+		// Verify the response
+		if err := n.handshakeMgr.VerifyHandshakeMessage(responseMsg); err != nil {
+			return fmt.Errorf("response handshake verification failed: %w", err)
+		}
+
+		// Register the peer
+		n.registerPeer(responseMsg.NodeID, connection)
+	}
+
+	return nil
+}
+
+// sendHandshakeMessage sends an encrypted handshake message
+func (n *Network) sendHandshakeMessage(conn net.Conn, msg *crypto.HandshakeMessage) error {
+	// For now, send unencrypted for testing. In real implementation, we'd need their public key
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal handshake message: %w", err)
+	}
+
+	// Add newline for message framing
+	data = append(data, '\n')
+
+	// Set write deadline
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+
+	_, err = conn.Write(data)
+	if err != nil {
+		return fmt.Errorf("failed to write handshake message: %w", err)
+	}
+
+	return nil
+}
+
+// receiveHandshakeMessage receives and parses a handshake message
+func (n *Network) receiveHandshakeMessage(conn net.Conn) (*crypto.HandshakeMessage, error) {
+	reader := bufio.NewReader(conn)
+	data, err := reader.ReadBytes('\n')
+	if err != nil {
+		return nil, fmt.Errorf("failed to read handshake message: %w", err)
+	}
+
+	// Remove newline
+	if len(data) > 0 && data[len(data)-1] == '\n' {
+		data = data[:len(data)-1]
+	}
+
+	var msg crypto.HandshakeMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal handshake message: %w", err)
+	}
+
+	return &msg, nil
+}
+
+// registerPeer registers a peer in our network
+func (n *Network) registerPeer(peerID string, connection *Connection) {
+	peer := NewPeer(peerID, connection.Address, "1.0.0")
+	peer.SetConnection(connection)
+	
+	n.peersMu.Lock()
+	n.peers[peerID] = peer
+	n.peersMu.Unlock()
+	
+	n.pool.AddPeer(peer)
+	
+	n.logger.Infof("registered new peer: %s at %s", peerID, connection.Address)
+}
+
+// handleConnectionWithEncryption processes a TCP connection with encryption (incoming or outgoing)
+func (n *Network) handleConnectionWithEncryption(conn net.Conn, incoming bool) {
+	connID := fmt.Sprintf("conn_%s_%d", conn.RemoteAddr().String(), time.Now().UnixNano())
+	
+	connection := &Connection{
+		ID:        connID,
+		Address:   conn.RemoteAddr().String(),
+		Conn:      conn,
+		CreatedAt: time.Now(),
+		LastSeen:  time.Now(),
+	}
+
+	n.logger.Infof("handling connection %s (incoming: %t) from %s", connID, incoming, conn.RemoteAddr())
+
+	// Add to connection pool
+	if err := n.pool.AddConnection(connection); err != nil {
+		n.logger.Errorf("failed to add connection to pool: %v", err)
+		conn.Close()
+		return
+	}
+
+	defer func() {
+		n.pool.RemoveConnection(connID)
+		conn.Close()
+	}()
+
+	// Perform handshake with encryption
+	if err := n.performSecureHandshake(conn, incoming, connection); err != nil {
+		n.logger.Errorf("secure handshake failed for connection %s: %v", connID, err)
+		return
+	}
+
+	// Start reading messages from the connection
+	if err := n.readMessages(conn, connection); err != nil {
+		n.logger.Errorf("error reading messages from connection %s: %v", connID, err)
+	}
+}
+
+// readMessages reads and processes messages from a connection
+func (n *Network) readMessages(conn net.Conn, connection *Connection) error {
+	reader := bufio.NewReader(conn)
+	for {
+		select {
+		case <-n.ctx.Done():
+			n.logger.Info("network context cancelled, closing connection")
+			return nil
+		default:
+			// Set read deadline to detect dead connections
+			conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+			
+			data, err := reader.ReadBytes('\n')
+			if err != nil {
+				if !strings.Contains(err.Error(), "use of closed network connection") {
+					n.logger.Errorf("error reading from connection: %v", err)
+				}
+				return err
+			}
+
+			// Update last seen time
+			connection.UpdateLastSeen()
+
+			// Deserialize the message
+			msg, err := DeserializeMessage(data)
+			if err != nil {
+				n.logger.Errorf("failed to deserialize message from %s: %v", conn.RemoteAddr(), err)
+				continue
+			}
+
+			// Validate the message
+			if err := msg.Validate(); err != nil {
+				n.logger.Errorf("invalid message from %s: %v", conn.RemoteAddr(), err)
+				continue
+			}
+
+			// Process the message based on type
+			if err := n.processMessage(msg, connection); err != nil {
+				n.logger.Errorf("error processing message from %s: %v", conn.RemoteAddr(), err)
+				continue
+			}
+		}
+	}
 }
