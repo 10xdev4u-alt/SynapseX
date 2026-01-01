@@ -49,3 +49,4 @@ config.local.yaml
 # Temporary files
 tmp/
 temp/
+commitsledgerx.sh
