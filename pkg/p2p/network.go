@@ -14,6 +14,7 @@ import (
 	"github.com/princetheprogrammer/synapse/internal/logger"
 	"github.com/princetheprogrammer/synapse/pkg/p2p/crypto"
 	"github.com/princetheprogrammer/synapse/pkg/p2p/discovery"
+	"github.com/princetheprogrammer/synapse/pkg/p2p/topology"
 )
 
 // Network represents the P2P network implementation
@@ -41,6 +42,9 @@ type Network struct {
 	bootstrapMgr    *discovery.BootstrapManager
 	mdnsDiscoverer  *discovery.MDNSDiscoverer
 	peerExchange    *discovery.PeerExchange
+
+	// Topology components for Phase 3
+	topologyMgr     *topology.Manager
 }
 
 // New creates a new P2P network instance
@@ -76,6 +80,7 @@ func New(cfg *config.Config, logger *logger.Logger, nodeID string) (*Network, er
 	// Initialize components
 	n.handshakeMgr = crypto.NewHandshakeManager(encryptor, nodeID)
 	n.bootstrapMgr = discovery.NewBootstrapManager(cfg.P2P.BootstrapPeers)
+	n.topologyMgr = topology.NewManager(cfg.P2P.MaxPeers)
 	n.peerExchange = discovery.NewPeerExchange(cfg.P2P.MaxPeers)
 
 	// Initialize connection pool
@@ -689,6 +694,15 @@ func (n *Network) registerPeer(peerID string, connection *Connection) {
 	n.peersMu.Unlock()
 	
 	n.pool.AddPeer(peer)
+	
+	// Create topology peer from our peer
+	topologyPeer := topology.Peer{
+		ID:       peer.ID,
+		Address:  peer.Address,
+		Version:  peer.Version,
+		LastSeen: peer.LastSeen,
+	}
+	n.topologyMgr.AddPeer(topologyPeer)
 	
 	n.logger.Infof("registered new peer: %s at %s", peerID, connection.Address)
 }
